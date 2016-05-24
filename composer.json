@@ -1,5 +1,5 @@
 {
-  "name": "thijsferyn/GoogleCloudVisionApi",
+  "name": "thijsferyn/google-cloud-vision-api",
   "description": "A wrapper around the Google Cloud Vision API written in PHP that depends on Guzzle",
   "type": "library",
   "keywords": [
@@ -11,7 +11,7 @@
     "artificial intelligence",
     "machine learning"
   ],
-  "homepage": "https://github.com/ThijsFeryn/GoogleCloudVisionApi",
+  "homepage": "https://github.com/ThijsFeryn/google-cloud-vision-api",
   "authors": [
     {
       "name": "Thijs Feryn",
@@ -20,7 +20,7 @@
     }
   ],
   "support": {
-    "issues": "https://github.com/ThijsFeryn/GoogleCloudVisionApi/issues"
+    "issues": "https://github.com/ThijsFeryn/google-cloud-vision-api/issues"
   },
   "minimum-stability": "dev",
   "require": {
