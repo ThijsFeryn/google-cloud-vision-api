@@ -2,7 +2,8 @@
 namespace GoogleCloudVision;
 use GuzzleHttp\ClientInterface as GuzzleClientInterface;
 use GuzzleHttp\Client as GuzzleClient;
-use GuzzleHttp\Promise\Promise;
+use GuzzleHttp\Promise;
+
 class Api
 {
     /**
@@ -17,6 +18,14 @@ class Api
      * @var string
      */
     protected $apiUrl;
+    /**
+     * @var string[]
+     */
+    protected $imageFilenames = [];
+    /**
+     * @var string[]
+     */
+    protected $imageUrls = [];
     /**
      * @var string[]
      */
@@ -42,11 +51,6 @@ class Api
      */
     protected $availableFeatures = ['LABEL_DETECTION','TEXT_DETECTION','FACE_DETECTION','LANDMARK_DETECTION',
         'LOGO_DETECTION','SAFE_SEARCH_DETECTION','IMAGE_PROPERTIES'];
-
-    /**
-     * @param string $apiKey
-     * @param GuzzleClientInterface|null $guzzleClient
-     */
     public function __construct(string $apiKey, GuzzleClientInterface $guzzleClient = null)
     {
         $this->apiKey = (string)$apiKey;
@@ -57,21 +61,12 @@ class Api
             $this->guzzleClient = new GuzzleClient();
         }
     }
-    /**
-     * @param string $apiKey
-     * @return Api
-     */
     public function setApiKey(string $apiKey) : Api
     {
         $this->apiKey = $apiKey;
         $this->apiUrl = $this->apiEndpoint . "/images:annotate?key=" . $this->apiKey;
         return $this;
     }
-    /**
-     * @param string $image
-     * @param string $name
-     * @return Api
-     */
     public function addRawImage(string $image, string $name) : Api
     {
         if(isset($this->images[$name])) {
@@ -80,52 +75,25 @@ class Api
         $this->images[$name] = base64_encode($image);
         return $this;
     }
-    /**
-     * @param string $filename
-     * @return Api
-     */
     public function addImageByFilename(string $filename) : Api
     {
-        if(isset($this->images[$filename])) {
+        if(in_array($filename,$this->imageFilenames)) {
             throw new Exception("Image '{$filename}' already added");
         }
-        if(!file_exists($filename)) {
-            throw new Exception("Image '{$filename}' not found");
-        }
-        $this->images[$filename] = base64_encode(file_get_contents($filename));
+        $this->imageFilenames[] = $filename;
         return $this;
     }
-    /**
-     * @param string $url
-     * @return Api
-     */
     public function addImageByUrl(string $url) : Api
     {
-        if(isset($this->images[$url])) {
+        if(in_array($url,$this->imageUrls)) {
             throw new Exception("Image {$url} already added");
         }
         if (filter_var($url, FILTER_VALIDATE_URL) === false) {
             throw new Exception("'{$url}' is not a valid URL");
         }
-        $this->images[$url] = base64_encode($this->guzzleClient->get($url)->getBody());
+        $this->imageUrls[] = $url;
         return $this;
     }
-    /**
-     * @param string $name
-     * @return string
-     */
-    public function getImage(string $name) : string
-    {
-        if(!isset($this->images[$name])) {
-            throw new Exception("Image '{$name}' has not been registered");
-        }
-        return $this->images[$name];
-    }
-    /**
-     * @param string $feature
-     * @param int $maxResults
-     * @return Api
-     */
     public function addFeature(string $feature, int $maxResults = 1) : Api
     {
         if(!in_array($feature,$this->availableFeatures)) {
@@ -144,51 +112,88 @@ class Api
             throw new Exception("Features cannot be empty");
         }
 
-        if (empty($this->images)) {
+        if (empty($this->images) && empty($this->imageFilenames) && empty($this->imageUrls)) {
             throw new Exception("Images cannot by empty");
         }
     }
-    /**
-     * @return array
-     */
-    protected function createRequestBody() : array
+    public function getImagesFromFile() : \Generator
+    {
+        foreach($this->imageFilenames as $filename) {
+            if(!file_exists($filename)) {
+                continue;
+            }
+            yield $filename => base64_encode(file_get_contents($filename));
+        }
+    }
+    protected function yieldAsyncPromisesForImageUrls(): \Generator
+    {
+        foreach($this->imageUrls as $url) {
+            yield $url => $this->guzzleClient->getAsync($url);
+        }
+    }
+    protected function yieldAsyncPromisesForPostRequests(int $batchSize): \Generator
+    {
+        foreach($this->createRequests($batchSize) as $key => $request) {
+            yield $key => $this->guzzleClient->postAsync($this->apiUrl,['headers'=>['Content-Type'=>'application/json'],'body'=>json_encode($request)]);
+        }
+    }
+    public function getImagesFromUrl(): \Generator
+    {
+        $results = Promise\unwrap($this->yieldAsyncPromisesForImageUrls());
+        foreach($results as $index=>$result) {
+            yield $index => base64_encode($result->getBody()->getContents());
+        }
+    }
+    protected function getImages(): \Generator
+    {
+        foreach($this->images as $image) {
+            yield $image;
+        }
+        yield from $this->getImagesFromFile();
+        yield from $this->getImagesFromUrl();
+    }
+    protected function createRequests(int $batchSize=10) : \Generator
     {
         $features = [];
         $requests = [];
+        $counter = 0;
+        $ids = [];
         foreach($this->features as $feature=>$maxResults) {
             $features[] = ['type'=>$feature,'maxResults'=>$maxResults];
         }
-        foreach($this->images as $image) {
+        foreach($this->getImages() as $id=>$image) {
+            if($counter == $batchSize) {
+                $counter = 0;
+                $keys = base64_encode(json_encode($ids));
+                yield $keys => ['requests' => $requests];
+                $requests = [];
+                $ids = [];
+            }
             $requests[] =                 [
                 'image' => ['content'=>$image],
                 'features' => $features
             ];
+            $ids[] = $id;
+            $counter++;
         }
-        $body = [
-            'requests' => $requests
-        ];
-        return $body;
+        $keys = base64_encode(json_encode($ids));
+        yield $keys => ['requests' => $requests];
     }
-    /**
-     * @return \stdClass
-     */
-    public function request() : \stdClass
+    protected function processResponse(string $index, \stdClass $data) : \Generator
+    {
+        $indexes = json_decode(base64_decode($index));
+        foreach($data->responses as $key=>$response) {
+            yield $indexes[$key] => $response;
+        }
+    }
+    public function request(int $batchSize=10)
     {
         $this->checkRequirements();
-        $response = $this->guzzleClient->post($this->apiUrl,['json'=>$this->createRequestBody()]);
-        return json_decode($response->getBody());
-    }
-    /**
-     * @return Promise
-     */
-    public function requestAsync() : Promise
-    {
-        $this->checkRequirements();
-        $promise =  $this->guzzleClient->postAsync($this->apiUrl,['json'=>$this->createRequestBody()]);
-        return $promise->then(
-            function (\Psr\Http\Message\ResponseInterface $res) {
-                return json_decode($res->getBody());
+        $results = Promise\unwrap($this->yieldAsyncPromisesForPostRequests($batchSize));
+        foreach($results as $index=>$result) {
+            foreach($this->processResponse($index, json_decode($result->getBody()->getContents())) as $key=>$response) {
+                yield $key=>$response;
             }
-        );
+        }
     }
 }
